@@ -5,14 +5,13 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceLine, Line, ComposedChart, Legend
 } from 'recharts';
 import { 
-  TrendingUp, Home, Car, Users, DollarSign, Calendar, ShieldCheck, Zap, Target, Clock, User, BarChart3, Rocket, ShieldAlert, Activity, Info, RefreshCcw, Cake, Search, ExternalLink, Briefcase, Compass, Baby, School, GraduationCap, ArrowUpCircle, PiggyBank, AlertTriangle
+  TrendingUp, Home, Car, Users, DollarSign, Calendar, ShieldCheck, Zap, Target, Clock, User, BarChart3, Rocket, ShieldAlert, Activity, Info, RefreshCcw, Cake, Search, ExternalLink, Briefcase, Compass, Baby, School, GraduationCap, ArrowUpCircle, PiggyBank, AlertTriangle, ChevronDown, ChevronUp, Table, FastForward
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 
 // --- 安全的 API Key 取得方式 ---
 const getApiKey = () => {
   try {
-    // 優先嘗試從 Vite 的 define 或環境變數取得
     return process.env.API_KEY || "";
   } catch (e) {
     return "";
@@ -26,7 +25,7 @@ const getAiClient = () => {
 };
 
 const SWR_DEFAULT = 0.04; 
-const STORAGE_KEY = 'NEXUS_FIRE_PROFILE_V7'; 
+const STORAGE_KEY = 'NEXUS_FIRE_PROFILE_V9'; 
 
 const EDU_COSTS = {
   KINDERGARTEN: 18000, 
@@ -52,6 +51,7 @@ interface UserProfile {
   carLoanMonths: number;
   currentAssets: number;
   annualReturn: number;
+  monthlyEtfInvestment: number; 
   kids: ChildProfile[];
   birthYear: number;
   birthMonth: number;
@@ -92,6 +92,7 @@ function NexusFIRE() {
       carLoanMonths: 72,
       currentAssets: 1500000,
       annualReturn: 7,
+      monthlyEtfInvestment: 20000,
       kids: [
         { birthYear: now.getFullYear() - 8, birthMonth: 5, isPrivateSchool: false },
         { birthYear: now.getFullYear() - 5, birthMonth: 10, isPrivateSchool: false }
@@ -109,11 +110,11 @@ function NexusFIRE() {
   const [targetMonthlyBudget, setTargetMonthlyBudget] = useState<number>(80000);
   const [targetRetireAge, setTargetRetireAge] = useState<number>(55);
   const [mode, setMode] = useState<ScenarioMode>('current');
-  const [aiMessage, setAiMessage] = useState<string>("正在讀取您的時間軌跡...");
+  const [aiMessage, setAiMessage] = useState<string>("分析資產複利動態中...");
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [stockAdvice, setStockAdvice] = useState<string>("");
-  const [stockSources, setStockSources] = useState<any[]>([]);
   const [isStockLoading, setIsStockLoading] = useState(false);
+  const [showDetailTable, setShowDetailTable] = useState(false);
 
   const liveState = useMemo(() => {
     const now = new Date();
@@ -146,6 +147,25 @@ function NexusFIRE() {
     const monthlyReturnRate = (profile.annualReturn / 100) / 12;
     const compoundFactor = Math.pow(1 + monthlyReturnRate, totalMonths);
     const requiredMonthlySaving = (assetsNeededForBudget - liveState.currentAssets * compoundFactor) * monthlyReturnRate / (compoundFactor - 1);
+    
+    // 計算「固定版」與「加速版(含債務釋放)」達標時間
+    let etfYearsToTarget = 0;
+    let accEtfYearsToTarget = 0;
+    let etfAssets = liveState.currentAssets;
+    let accEtfAssets = liveState.currentAssets;
+
+    for (let m = 1; m <= 600; m++) {
+      // 靜態固定投入
+      etfAssets = (etfAssets * (1 + monthlyReturnRate)) + profile.monthlyEtfInvestment;
+      if (etfAssets >= assetsNeededForBudget && etfYearsToTarget === 0) etfYearsToTarget = m / 12;
+
+      // 加速版：考慮債務消失後轉入 ETF
+      const mortgageReinvest = m >= liveState.currentMortgageMonths ? profile.mortgage : 0;
+      const carReinvest = m >= liveState.currentCarLoanMonths ? profile.carLoan : 0;
+      accEtfAssets = (accEtfAssets * (1 + monthlyReturnRate)) + (profile.monthlyEtfInvestment + mortgageReinvest + carReinvest);
+      if (accEtfAssets >= assetsNeededForBudget && accEtfYearsToTarget === 0) accEtfYearsToTarget = m / 12;
+    }
+
     let initialEduCost = 0;
     profile.kids.forEach(child => {
       const childAge = getDecimalAge(child.birthYear, child.birthMonth);
@@ -154,7 +174,14 @@ function NexusFIRE() {
     const currentAverageMonthlySavings = profile.monthlyIncome - (profile.basicLivingExpenses + initialEduCost + 
       (liveState.currentMortgageMonths > 0 ? profile.mortgage : 0) + 
       (liveState.currentCarLoanMonths > 0 ? profile.carLoan : 0));
-    return { assetsNeededForBudget, requiredMonthlySaving: Math.max(0, Math.round(requiredMonthlySaving)), savingsGap: Math.max(0, Math.round(requiredMonthlySaving - currentAverageMonthlySavings)) };
+    
+    return { 
+      assetsNeededForBudget, 
+      requiredMonthlySaving: Math.max(0, Math.round(requiredMonthlySaving)), 
+      savingsGap: Math.max(0, Math.round(requiredMonthlySaving - currentAverageMonthlySavings)),
+      etfYearsToTarget,
+      accEtfYearsToTarget
+    };
   }, [profile, liveState, targetMonthlyBudget, targetRetireAge]);
 
   useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(profile)); }, [profile]);
@@ -181,8 +208,16 @@ function NexusFIRE() {
       const monthlySavings = p.monthlyIncome - monthlyExpenses;
       const monthlyReturnRate = (adjAnnualReturn / 100) / 12;
       currentWealth = (currentWealth * (1 + monthlyReturnRate)) + monthlySavings;
+      
       if (month % 12 === 0) {
-        history.push({ year, age: Number((live.currentAge + year).toFixed(1)), wealth: Math.round(currentWealth), eduCost: Math.round(totalEduCost), debtCost: Math.round((isMortgagePaid ? 0 : p.mortgage) + (isCarPaid ? 0 : p.carLoan)) });
+        history.push({ 
+          year, 
+          age: Number((live.currentAge + year).toFixed(1)), 
+          wealth: Math.round(currentWealth), 
+          eduCost: Math.round(totalEduCost), 
+          debtCost: Math.round((isMortgagePaid ? 0 : p.mortgage) + (isCarPaid ? 0 : p.carLoan)),
+          monthlySavings: Math.round(monthlySavings)
+        });
       }
       if (currentWealth >= fireTarget && yearsToFire === 0) { yearsToFire = year; }
     }
@@ -211,11 +246,11 @@ function NexusFIRE() {
     }
     setIsAiLoading(true);
     try {
-      const prompt = `分析 FIRE 進度：現年 ${liveState.currentAge.toFixed(1)}，目標 ${targetRetireAge} 歲，預算 ${targetMonthlyBudget}，缺口 ${reversePlanning.savingsGap}。請給予具體建議。`;
+      const prompt = `分析 FIRE 進度：現年 ${liveState.currentAge.toFixed(1)}，債務結束後現金流將自動轉入 ETF。請針對「加速路徑」給予建議，說明債務消失對資產滾動的具體影響。`;
       const response = await ai.models.generateContent({ model: 'gemini-3-flash-preview', contents: prompt });
-      setAiMessage(response.text || "規劃是通往自由的唯一捷徑。");
+      setAiMessage(response.text || "複利是世界第八大奇蹟，債務釋放則是引擎的增壓器。");
     } catch (e) {
-      setAiMessage("API 調用失敗，請確認 Key 的權限與額度。");
+      setAiMessage("AI 分析暫時不可用，請檢查連線。");
     } finally { setIsAiLoading(false); }
   };
 
@@ -224,10 +259,9 @@ function NexusFIRE() {
     if (!ai) return;
     setIsStockLoading(true);
     try {
-      const prompt = `目標月退休金 $${targetMonthlyBudget}，缺口 $${reversePlanning.savingsGap}。請建議 3-5 個適合台股長期標的。`;
+      const prompt = `我將在房貸與車貸結束後，將原本月繳 $${profile.mortgage + profile.carLoan} 的現金流轉入投資。請建議適合大規模轉入的穩健台股 ETF 或標的。`;
       const response = await ai.models.generateContent({ model: 'gemini-3-flash-preview', contents: prompt, config: { tools: [{ googleSearch: {} }] } });
       setStockAdvice(response.text || "暫時無法獲取建議。");
-      setStockSources(response.candidates?.[0]?.groundingMetadata?.groundingChunks || []);
     } catch (error) { setStockAdvice("搜尋標的失敗。"); } finally { setIsStockLoading(false); }
   };
 
@@ -247,7 +281,7 @@ function NexusFIRE() {
       {!getApiKey() && (
         <div className="max-w-7xl mx-auto mb-6 bg-rose-500/10 border border-rose-500/50 p-4 rounded-2xl flex items-center gap-3 text-rose-400 text-sm">
           <AlertTriangle size={18} />
-          <span>檢測到 API Key 缺失。請確保已在 Netlify Environment Variables 設置 <strong>API_KEY</strong>。</span>
+          <span>檢測到 API Key 缺失。請在 Netlify 設定 <strong>API_KEY</strong>。</span>
         </div>
       )}
       
@@ -259,7 +293,7 @@ function NexusFIRE() {
           <div>
             <h1 className="text-xl font-black tracking-tighter">NEXUS <span className="text-emerald-400">FIRE</span></h1>
             <div className="flex items-center gap-1.5 text-[9px] text-slate-500 font-bold uppercase tracking-tighter">
-              <RefreshCcw size={8} className="animate-spin-slow" /> Strategic Planner V7
+              <RefreshCcw size={8} className="animate-spin-slow" /> Strategic Planner V9
             </div>
           </div>
         </div>
@@ -276,15 +310,15 @@ function NexusFIRE() {
         <div className="lg:col-span-4 space-y-6">
           <div className="bg-slate-900/60 border border-white/10 rounded-3xl p-6 backdrop-blur-md">
             <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-6 flex items-center gap-2">
-              <Cake size={14} className="text-purple-400" /> 生日與基準
+              <Cake size={14} className="text-purple-400" /> 生日與精確年齡
             </h2>
-            <div className="space-y-4">
+            <div className="space-y-4 text-left">
               <div className="grid grid-cols-2 gap-4">
                 <InputItem label="出生年份" value={profile.birthYear} onChange={(v) => setProfile({...profile, birthYear: v})} icon={<Calendar size={16}/>} />
                 <InputItem label="出生月份" value={profile.birthMonth} onChange={(v) => setProfile({...profile, birthMonth: v})} icon={<Clock size={16}/>} />
               </div>
               <div className="p-3 bg-slate-950/50 rounded-xl border border-white/5 flex items-center justify-between">
-                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">目前精確年齡</span>
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">目前年齡推估</span>
                 <span className="text-sm font-black text-purple-400">{liveState.currentAge.toFixed(2)} 歲</span>
               </div>
             </div>
@@ -294,7 +328,7 @@ function NexusFIRE() {
             <h2 className="text-xs font-bold text-indigo-400 uppercase tracking-widest mb-6 flex items-center gap-2">
               <Compass size={14} /> FIRE 目標反推
             </h2>
-            <div className="space-y-4">
+            <div className="space-y-4 text-left">
               <InputItem label="退休理想月預算" value={targetMonthlyBudget} onChange={setTargetMonthlyBudget} icon={<DollarSign size={16}/>} hint={`所需總額約 $${(reversePlanning.assetsNeededForBudget/10000).toFixed(0)} 萬`} />
               <InputItem label="設定目標退休年齡" value={targetRetireAge} onChange={setTargetRetireAge} icon={<Clock size={16}/>} hint={`距離目標還有 ${(targetRetireAge - liveState.currentAge).toFixed(1)} 年`} />
               <div className="p-4 bg-indigo-500/5 rounded-2xl border border-indigo-500/10 space-y-2">
@@ -302,30 +336,51 @@ function NexusFIRE() {
                   <span className="text-[10px] font-bold text-slate-500 uppercase">準時退休缺口</span>
                   <span className="text-sm font-black text-indigo-400">$ {reversePlanning.savingsGap.toLocaleString()} /月</span>
                 </div>
-                <p className="text-[9px] text-slate-500 leading-tight">
-                  {reversePlanning.savingsGap > 0 ? `每月需「額外」增加儲蓄。` : "恭喜！依照目前進度，您能提前達標。"}
-                </p>
               </div>
+            </div>
+          </div>
+
+          <div className="bg-slate-900/60 border border-emerald-500/20 rounded-3xl p-6 backdrop-blur-md">
+            <h2 className="text-xs font-bold text-emerald-400 uppercase tracking-widest mb-6 flex items-center gap-2">
+              <TrendingUp size={14} /> 核心收支與 ETF
+            </h2>
+            <div className="space-y-4 text-left">
+              <InputItem label="預期年回報 %" value={profile.annualReturn} onChange={(v) => setProfile({...profile, annualReturn: v})} icon={<BarChart3 size={16}/>} />
+              <InputItem 
+                label="每月初始投入 ETF" 
+                value={profile.monthlyEtfInvestment} 
+                onChange={(v) => setProfile({...profile, monthlyEtfInvestment: v})} 
+                icon={<PiggyBank size={16} className="text-indigo-400"/>} 
+                hint={`基礎需 ${reversePlanning.etfYearsToTarget.toFixed(1)} 年`}
+              />
+              <InputItem label="月總收入 (不含息)" value={profile.monthlyIncome} onChange={(v) => setProfile({...profile, monthlyIncome: v})} icon={<DollarSign size={16}/>} />
+              <InputItem label="目前資產" value={profile.currentAssets} onChange={(v) => setProfile({...profile, currentAssets: v, baseAssetDate: Date.now()})} icon={<Zap size={16}/>} hint={"今日推估值：$" + liveState.currentAssets.toLocaleString()} />
+              <InputItem label="基礎月開銷" value={profile.basicLivingExpenses} onChange={(v) => setProfile({...profile, basicLivingExpenses: v})} icon={<Calendar size={16}/>} />
             </div>
           </div>
 
           <div className="bg-slate-900/60 border border-blue-500/20 rounded-3xl p-6 backdrop-blur-md">
             <h2 className="text-xs font-bold text-blue-400 uppercase tracking-widest mb-6 flex items-center gap-2">
-              <Target size={14} /> 債務週期追蹤
+              <Target size={14} /> 債務與現金流釋放
             </h2>
-            <div className="space-y-6">
+            <div className="space-y-6 text-left">
+              <div className="p-3 bg-blue-500/5 rounded-xl border border-blue-500/10 mb-2">
+                <p className="text-[10px] text-blue-300/80 leading-relaxed italic">
+                  💡 系統已設定：債務結束後，月繳金額將自動轉入 ETF 計算複利。
+                </p>
+              </div>
               <div className="space-y-3">
-                <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500 uppercase"><Home size={12}/> 房貸規劃</div>
+                <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500 uppercase"><Home size={12}/> 房貸支出</div>
                 <div className="grid grid-cols-2 gap-3">
                   <InputItem label="月繳金額" value={profile.mortgage} onChange={(v) => setProfile({...profile, mortgage: v})} />
-                  <InputItem label="剩餘月數" value={profile.mortgageMonths} onChange={(v) => setProfile({...profile, mortgageMonths: v})} hint={`目前剩 ${liveState.currentMortgageMonths} 月`} />
+                  <InputItem label="剩餘月數" value={profile.mortgageMonths} onChange={(v) => setProfile({...profile, mortgageMonths: v})} hint={`剩 ${liveState.currentMortgageMonths} 月`} />
                 </div>
               </div>
               <div className="space-y-3">
-                <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500 uppercase"><Car size={12}/> 車貸規劃</div>
+                <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500 uppercase"><Car size={12}/> 車貸支出</div>
                 <div className="grid grid-cols-2 gap-3">
                   <InputItem label="月繳金額" value={profile.carLoan} onChange={(v) => setProfile({...profile, carLoan: v})} />
-                  <InputItem label="剩餘月數" value={profile.carLoanMonths} onChange={(v) => setProfile({...profile, carLoanMonths: v})} hint={`目前剩 ${liveState.currentCarLoanMonths} 月`} />
+                  <InputItem label="剩餘月數" value={profile.carLoanMonths} onChange={(v) => setProfile({...profile, carLoanMonths: v})} hint={`剩 ${liveState.currentCarLoanMonths} 月`} />
                 </div>
               </div>
             </div>
@@ -335,11 +390,11 @@ function NexusFIRE() {
             <h2 className="text-xs font-bold text-rose-400 uppercase tracking-widest mb-6 flex items-center gap-2">
               <Baby size={14} /> 子女教育週期
             </h2>
-            <div className="space-y-6">
+            <div className="space-y-6 text-left">
               {profile.kids.map((child, idx) => (
                 <div key={idx} className="p-4 bg-slate-950/50 rounded-2xl border border-white/5 space-y-4">
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase">女兒 {idx + 1}</span>
+                    <span className="text-[10px] font-bold text-slate-500 uppercase">子女 {idx + 1}</span>
                     <button onClick={() => updateChild(idx, 'isPrivateSchool', !child.isPrivateSchool)} className={`text-[9px] px-2 py-1 rounded-full border transition-all ${child.isPrivateSchool ? 'bg-rose-500/10 border-rose-500/50 text-rose-400' : 'border-slate-700 text-slate-500'}`}>{child.isPrivateSchool ? '私立' : '公立'}</button>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
@@ -350,28 +405,16 @@ function NexusFIRE() {
               ))}
             </div>
           </div>
-
-          <div className="bg-slate-900/60 border border-white/10 rounded-3xl p-6 backdrop-blur-md">
-            <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-6 flex items-center gap-2">
-              <TrendingUp size={14} className="text-emerald-400" /> 核心收支計畫
-            </h2>
-            <div className="space-y-4">
-              <InputItem label="預期回報 %" value={profile.annualReturn} onChange={(v) => setProfile({...profile, annualReturn: v})} icon={<BarChart3 size={16}/>} />
-              <InputItem label="月總收入" value={profile.monthlyIncome} onChange={(v) => setProfile({...profile, monthlyIncome: v})} icon={<DollarSign size={16}/>} />
-              <InputItem label="目前資產" value={profile.currentAssets} onChange={(v) => setProfile({...profile, currentAssets: v, baseAssetDate: Date.now()})} icon={<Zap size={16}/>} hint={"今日推估：$" + liveState.currentAssets.toLocaleString()} />
-              <InputItem label="基礎月開銷" value={profile.basicLivingExpenses} onChange={(v) => setProfile({...profile, basicLivingExpenses: v})} icon={<Calendar size={16}/>} />
-            </div>
-          </div>
         </div>
 
-        <div className="lg:col-span-8 space-y-6">
+        <div className="lg:col-span-8 space-y-6 text-left">
           <div className="bg-gradient-to-br from-slate-900 to-slate-800 border border-white/10 rounded-[2.5rem] p-8 relative overflow-hidden shadow-2xl">
             <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/5 blur-[100px] rounded-full -mr-20 -mt-20"></div>
             <div className="flex items-center gap-3 mb-4 relative z-10">
-              <img src={`https://api.dicebear.com/7.x/bottts/svg?seed=firev7&backgroundColor=0f172a`} className="w-10 h-10 rounded-full bg-slate-700 border border-white/10 shadow-lg" alt="Mentor" />
-              <div className="flex flex-col text-left">
+              <img src={`https://api.dicebear.com/7.x/bottts/svg?seed=firev9&backgroundColor=0f172a`} className="w-10 h-10 rounded-full bg-slate-700 border border-white/10 shadow-lg" alt="Mentor" />
+              <div className="flex flex-col">
                 <h3 className="text-sm font-bold text-emerald-400 tracking-tight">AI Achievement Mentor</h3>
-                <span className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Education & Debt Integrated</span>
+                <span className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Accelerated Debt-to-Equity</span>
               </div>
             </div>
             <p className={`text-lg leading-relaxed relative z-10 font-medium ${isAiLoading ? 'opacity-50 animate-pulse' : ''}`}>
@@ -381,12 +424,25 @@ function NexusFIRE() {
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <StatCard label="達成歲數" value={`${(liveState.currentAge + activeData.yearsToFire).toFixed(1)} 歲`} subtext={`目標 ${targetRetireAge} 歲`} highlight={(liveState.currentAge + activeData.yearsToFire) <= targetRetireAge ? 'text-emerald-400' : 'text-rose-400'} />
-            <StatCard label="所需總額" value={`$${(reversePlanning.assetsNeededForBudget / 10000).toFixed(0)} 萬`} subtext={`預算 $${targetMonthlyBudget.toLocaleString()}`} icon={<PiggyBank size={14} />} />
+            <StatCard 
+              label="債務加速達標" 
+              value={`${reversePlanning.accEtfYearsToTarget.toFixed(1)} 年`} 
+              subtext={`較基礎縮短 ${(reversePlanning.etfYearsToTarget - reversePlanning.accEtfYearsToTarget).toFixed(1)} 年`} 
+              icon={<FastForward size={14} className="text-blue-400" />} 
+              highlight="text-blue-400"
+            />
+            <StatCard label="所需總額" value={`$${(reversePlanning.assetsNeededForBudget / 10000).toFixed(0)} 萬`} subtext={`月支 $${targetMonthlyBudget.toLocaleString()}`} icon={<PiggyBank size={14} />} />
             <StatCard label="儲蓄缺口" value={`$${reversePlanning.savingsGap.toLocaleString()}`} subtext="每月需額外投入" highlight={reversePlanning.savingsGap > 0 ? 'text-indigo-400' : 'text-emerald-400'} icon={<ArrowUpCircle size={14} />} />
-            <StatCard label="現金流釋放" value={`+ $${(profile.mortgage + profile.carLoan).toLocaleString()}`} subtext="債務清償後月增額" icon={<Zap size={14} className="text-blue-400" />} />
           </div>
 
           <div className="bg-slate-900/60 border border-white/10 rounded-[2.5rem] p-8">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-sm font-bold text-slate-300">長期資產複利曲線 (含債務轉入)</h3>
+              <div className="flex items-center gap-2 text-[10px] text-slate-500 font-bold uppercase">
+                <span className="flex items-center gap-1"><div className="w-2 h-2 bg-emerald-500 rounded-full"></div> 資產</span>
+                <span className="flex items-center gap-1"><div className="w-2 h-2 bg-rose-500 rounded-full"></div> 支出</span>
+              </div>
+            </div>
             <div className="h-[400px]">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={scenarios.chartData}>
@@ -402,26 +458,70 @@ function NexusFIRE() {
                   <Tooltip contentStyle={{ backgroundColor: '#0f172a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '16px' }} />
                   <Legend verticalAlign="top" height={36}/>
                   <Area yAxisId="left" name="資產累積" type="monotone" dataKey="current" stroke="#10B981" strokeWidth={3} fill="url(#colorCurrent)" />
-                  <Area yAxisId="right" name="階段支出" type="stepAfter" dataKey="eduCost" stroke="#f43f5e" strokeWidth={2} fillOpacity={0.05} />
+                  <Area yAxisId="right" name="各項支出" type="stepAfter" dataKey="eduCost" stroke="#f43f5e" strokeWidth={2} fillOpacity={0.05} />
                   <Line yAxisId="left" name="積極情境" type="monotone" dataKey="aggressive" stroke="#6366f1" strokeWidth={1} dot={false} strokeDasharray="3 3" />
-                  <ReferenceLine yAxisId="left" y={reversePlanning.assetsNeededForBudget} stroke="#6366f1" strokeDasharray="5 5" />
+                  <ReferenceLine yAxisId="left" y={reversePlanning.assetsNeededForBudget} stroke="#6366f1" strokeDasharray="5 5" label={{ position: 'top', value: 'FIRE 目標', fill: '#6366f1', fontSize: 10 }} />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
           </div>
 
           <div className="bg-slate-900/60 border border-white/10 rounded-[2.5rem] p-8">
+            <button 
+              onClick={() => setShowDetailTable(!showDetailTable)} 
+              className="w-full flex items-center justify-between group"
+            >
+              <div className="flex items-center gap-3">
+                <Table size={20} className="text-emerald-400" />
+                <div className="text-left">
+                  <h3 className="text-sm font-bold text-slate-300">資產增長年度明細 (含月結餘與支出變化)</h3>
+                  <p className="text-[11px] text-slate-500">查看債務結束與子女教育開銷對複利的影響</p>
+                </div>
+              </div>
+              {showDetailTable ? <ChevronUp className="text-slate-500" /> : <ChevronDown className="text-slate-500 group-hover:text-emerald-400 transition-colors" />}
+            </button>
+            
+            {showDetailTable && (
+              <div className="mt-6 overflow-x-auto">
+                <table className="w-full text-left text-[11px] text-slate-400 border-collapse">
+                  <thead>
+                    <tr className="border-b border-white/5">
+                      <th className="py-3 font-bold uppercase text-slate-500">年齡</th>
+                      <th className="py-3 font-bold uppercase text-slate-500 text-right">預估資產</th>
+                      <th className="py-3 font-bold uppercase text-slate-500 text-right">該年平均月結餘</th>
+                      <th className="py-3 font-bold uppercase text-slate-500 text-right text-rose-400/80">教育支出</th>
+                      <th className="py-3 font-bold uppercase text-slate-500 text-right">房/車貸支出</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {activeData.history.filter((_, i) => i % 2 === 0).slice(0, 25).map((row, i) => (
+                      <tr key={i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                        <td className="py-3 font-bold text-slate-300">{row.age} 歲</td>
+                        <td className="py-3 text-right font-mono text-emerald-400">${row.wealth.toLocaleString()}</td>
+                        <td className="py-3 text-right font-mono text-indigo-300">${row.monthlySavings.toLocaleString()}</td>
+                        <td className="py-3 text-right font-mono text-rose-400">${row.eduCost.toLocaleString()}</td>
+                        <td className="py-3 text-right font-mono text-blue-400">${row.debtCost.toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="mt-4 text-[10px] text-slate-500 text-center italic">顯示前 25 年資料。結餘已包含債務釋放與教育階段轉換之影響。</p>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-slate-900/60 border border-white/10 rounded-[2.5rem] p-8">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8">
               <div>
-                <h3 className="text-sm font-bold text-slate-300 mb-2 flex items-center gap-2"><Briefcase size={16} className="text-blue-400" /> 加速達成建議</h3>
-                <p className="text-[11px] text-slate-500">AI 將建議如何運用每月額外的 ${reversePlanning.savingsGap.toLocaleString()} 元缺口。</p>
+                <h3 className="text-sm font-bold text-slate-300 mb-2 flex items-center gap-2"><Briefcase size={16} className="text-blue-400" /> 加速與標的建議</h3>
+                <p className="text-[11px] text-slate-500">當債務轉入投資時，投資組合的穩定度更為重要。</p>
               </div>
               <button onClick={fetchStockAdvice} disabled={isStockLoading || !getApiKey()} className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 px-6 py-3 rounded-2xl text-xs font-bold transition-all flex items-center gap-2">
-                {isStockLoading ? <RefreshCcw size={14} className="animate-spin" /> : <Search size={14} />} 分析達成標的
+                {isStockLoading ? <RefreshCcw size={14} className="animate-spin" /> : <Search size={14} />} 分析加速標的
               </button>
             </div>
             {stockAdvice && (
-              <div className="bg-slate-950/50 border border-white/5 rounded-3xl p-6 text-left whitespace-pre-line text-slate-300 text-sm leading-relaxed">
+              <div className="bg-slate-950/50 border border-white/5 rounded-3xl p-6 whitespace-pre-line text-slate-300 text-sm leading-relaxed">
                 {stockAdvice}
               </div>
             )}
@@ -453,14 +553,14 @@ function InputItem({ label, value, onChange, icon, hint }: any) {
         {icon && <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-emerald-500">{icon}</div>}
         <input type="number" value={value} onChange={(e) => onChange(Number(e.target.value))} className={`w-full bg-slate-950/50 border border-white/5 rounded-xl py-3 ${icon ? 'pl-10' : 'pl-4'} pr-4 text-sm text-white focus:outline-none focus:border-emerald-500/50 transition-all`} />
       </div>
-      {hint && <p className="text-[9px] text-slate-500 mt-1 px-1">{hint}</p>}
+      {hint && <p className="text-[9px] text-slate-500 mt-1 px-1 leading-tight">{hint}</p>}
     </div>
   );
 }
 
 function StatCard({ label, value, subtext, highlight, icon }: any) {
   return (
-    <div className="bg-slate-900/40 border border-white/5 rounded-3xl p-6 text-left hover:bg-slate-900/60 transition-all">
+    <div className="bg-slate-900/40 border border-white/5 rounded-3xl p-6 text-left hover:bg-slate-900/60 transition-all ring-1 ring-white/5">
       <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500 uppercase mb-2">{icon} {label}</div>
       <div className={`text-xl font-black mb-1 ${highlight || 'text-white'}`}>{value}</div>
       <div className="text-[9px] text-slate-400 font-medium">{subtext}</div>
